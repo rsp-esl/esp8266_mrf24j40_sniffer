@@ -177,7 +177,7 @@ uint16_t rf_get_pan_id( ) {
 }
 
 // flush RX Buffer
-void rf_flush_rx_buffer() {
+inline void rf_flush_rx_buffer() {
    mrf_reg_t _reg;
    _reg.value = mrf.readShortAddr( MRF_RXFLUSH );  // read the RXFLUSH register
    _reg.rxflush.RXFLUSH = 1;      // set RXFLUSH bit = 1 (Reset the RX buffer pointer to 0)
@@ -232,11 +232,9 @@ void irq_handler() {
       int len = mrf.readLongAddr( frame_pos++ ); // read the frame length
       uint8_t *ptr = &frame_buf[0];
       *ptr++ = len; // save the frame length
-      for ( int i=0; i < len; i++ ) { 
+      for ( int i=0; i < 5; i++ ) { // read only the first 5 bytes from RX FIFO
          *ptr++ = mrf.readLongAddr( frame_pos++ );
       }
-      *ptr++ = mrf.readLongAddr( frame_pos++ );  // LQI
-      *ptr++ = mrf.readLongAddr( frame_pos++ );  // RSSI
       rf_flush_rx_buffer();
       mrf.writeShortAddr( MRF_BBREG1, 0x00 );    // enable RX (clear RXDECINV bit)
       irq_rx_flag = true;
@@ -251,11 +249,19 @@ bool rf_packet_receive( rx_packet_t *pkt ) {
       return false;
    }
    irq_rx_flag = false;
+   
    int len = frame_buf[0];
+   uint8_t *ptr = pkt->frame_data;
+   memcpy( ptr, (const uint8_t *)&frame_buf[1], len );
+   uint16_t frame_pos = MRF_RX_FIFO + 6; // skip the first 6 bytes in RX FIFO
+   ptr = ptr+5; // skip the first 5 bytes in data buffer
+   for ( int i=5; i < len; i++ ) {
+       *ptr++ = mrf.readLongAddr( frame_pos++ );
+   }
+   pkt->lqi  = mrf.readLongAddr( frame_pos++ );  // LQI
+   pkt->rssi = mrf.readLongAddr( frame_pos++ );  // RSSI
    pkt->frame_len = len;
-   memcpy( pkt->frame_data, (const uint8_t *)&frame_buf[1], len );
-   pkt->lqi  = frame_buf[len+1];
-   pkt->rssi = frame_buf[len+2];
+   
    uint32_t micro_ts = micros();   
    pkt->ts_sec  = micro_ts / 1000000UL;
    pkt->ts_usec = micro_ts % 1000000UL;
@@ -290,7 +296,7 @@ int count = 0;
 int ack_count = 0;
 int retry_count = 0;
 int send_failed_count = 0;
-const char *message = "abcdefghijklmnopqrstuvwxyz";
+const char *message = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 #endif
 
 #if defined(MRF24J40_RECEIVER) 
@@ -377,13 +383,13 @@ void loop() {
       }
       if ( count < NUM_PACKETS_TO_SEND ) {
          retry_count = 0;
-         sprintf( buf, "#%04d,%s%s%s\n", count, message, message, message );
+         sprintf( buf, "%s,#%04d\n", message, count );
          rf_send_packet( (uint8_t *)buf, strlen(buf) );
          while ( !irq_tx_flag ) { // wait for TX completion
             retry_count++;
             if ( retry_count >= 15 ) {
                send_failed_count++;
-               Serial.println( F(">>> Packet sending failed...") );
+               Serial.println( F(">>> Packet sending failed") );
                break;
             }
             delayMicroseconds(100);
@@ -396,7 +402,7 @@ void loop() {
             retry_count = 0;
             while ( !irq_rx_flag ) { // wait for incoming ACK packet
                if ( ++retry_count > 25 ) {
-                  Serial.println( F(">>> No ACK received...") );
+                  Serial.println( F(">>> No ACK") );
                   break; 
                }
                delayMicroseconds(100);
