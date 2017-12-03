@@ -6,21 +6,22 @@
 // Hardware/Software used for testing: 
 //   - ESP8266 (WeMos D1 mini) + MRF24J40MA module
 //   - Arduino IDE 1.8.2 / ESP8266 package v2.3.0 
-//  
-// Date: 2017-12-02
+// 
+// This sketch is used to program the ESP8266 + MRF24J40 hardware so that
+// it operates as either a sender or a receiver for testing purposes.
+// Date: 2017-12-03
 ///////////////////////////////////////////////////////////////////////////////////////
 
 #include <ESP8266WiFi.h>
 #include "mrf24j40.h"
 
-// Define the type of device to be used: sender, receiver, or sniffer
+// Define the type of device to be used: sender or receiver
 //#define MRF24J40_SENDER
-//#define MRF24J40_RECEIVER
-#define MRF24J40_SNIFFER
+#define MRF24J40_RECEIVER
 
 // Specify the radio channel 
 // (according to IEEE 802.15.4: select channel number between 11..26)
-#define CHANNEL               (13) 
+#define CHANNEL               (14) 
 
 // Specify the PAN ID (a 16-bit hex integer value)
 #define PAN_ID                (0x1234)
@@ -62,7 +63,7 @@ MRF24J40 mrf( CS_PIN /*cs*/, RST_PIN /*reset*/, INT_PIN /*irq*/ );
 
 volatile bool irq_tx_flag = false; // interrupt (INT) request flag for TX completion
 volatile bool irq_rx_flag = false; // interrupt (INT) request flag for RX reception
-volatile uint8_t data_buf[128], pkt_len = 0;
+uint8_t frame_buf[132];
 
 uint32_t ts;                    // used to keep timestamp
 char buf[200];                  // string buffer
@@ -92,8 +93,8 @@ void rf_default_settings() {
    // #SLPCKEN = 0 : enable low-power clock selection
    mrf.writeLongAddr( MRF_SLPCON0,  0x00 );
 
-   //    RXIE  = 0:  Enable RX FIFO reception interrupt
-   //    TXNIE = 0:  Enable TX Normal FIFO transmission interrupt
+   // RXIE  = 0:  Enable RX FIFO reception interrupt
+   // TXNIE = 0:  Enable TX Normal FIFO transmission interrupt
    mrf.writeShortAddr( MRF_INTCON,  0b11110110 ); 
 
 #ifdef USE_MRF24J40MB
@@ -210,7 +211,7 @@ void rf_send_packet( uint8_t *data, uint8_t len ) {
 
    // Payload
    for ( int j=0; j < len; j++ ) {
-     mrf.writeLongAddr( i++, data[j] );
+      mrf.writeLongAddr( i++, data[j] );
    }
    mrf_reg_t _reg;
    _reg.value = 0x00;
@@ -223,20 +224,25 @@ void rf_send_packet( uint8_t *data, uint8_t len ) {
 void irq_handler() {
    mrf_reg_t _reg;
    _reg.value = mrf.readShortAddr( MRF_INTSTAT );  // read the status and clear interrupt
-   
+
    if ( _reg.intstat.RXIF == 1 ) {
-     mrf.writeShortAddr( MRF_BBREG1, 0x40 ); // disable RX
-     uint16_t frame_pos = MRF_RX_FIFO;
-     pkt_len = mrf.readLongAddr( frame_pos++ );
-     for ( int i=0; i < 5; i++ ) {
-        data_buf[i] = mrf.readLongAddr( frame_pos++ );
-     }
-     irq_rx_flag = true;
-     rf_flush_rx_buffer();   
-     mrf.writeShortAddr( MRF_BBREG1, 0x00 ); // enable RX 
+      mrf.writeShortAddr( MRF_BBREG1, 0x40 );    // disable RX (set RXDECINV bit)
+      // read data from RX FIFO and save to frame buffer (frame_buf)
+      uint16_t frame_pos = MRF_RX_FIFO;
+      int len = mrf.readLongAddr( frame_pos++ ); // read the frame length
+      uint8_t *ptr = &frame_buf[0];
+      *ptr++ = len; // save the frame length
+      for ( int i=0; i < len; i++ ) { 
+         *ptr++ = mrf.readLongAddr( frame_pos++ );
+      }
+      *ptr++ = mrf.readLongAddr( frame_pos++ );  // LQI
+      *ptr++ = mrf.readLongAddr( frame_pos++ );  // RSSI
+      rf_flush_rx_buffer();
+      mrf.writeShortAddr( MRF_BBREG1, 0x00 );    // enable RX (clear RXDECINV bit)
+      irq_rx_flag = true;
    } 
    if ( _reg.intstat.TXNIF == 1 ) {
-     irq_tx_flag = true;
+      irq_tx_flag = true;
    }
 }
 
@@ -244,27 +250,21 @@ bool rf_packet_receive( rx_packet_t *pkt ) {
    if ( !irq_rx_flag ) {
       return false;
    }
-   int len = pkt_len;
-   uint16_t frame_pos = MRF_RX_FIFO + 6;
-   pkt->frame_len = pkt_len;
-   for ( int i=5; i < len; i++ ) {
-      data_buf[i] = mrf.readLongAddr( frame_pos++ );
-   }
-   pkt->lqi  = mrf.readLongAddr( frame_pos++ );
-   pkt->rssi = mrf.readLongAddr( frame_pos++ );
-
-   memcpy( pkt->frame_data, (const void *)data_buf, len );
-
-   pkt_len = 0;
    irq_rx_flag = false;
+   int len = frame_buf[0];
+   pkt->frame_len = len;
+   memcpy( pkt->frame_data, (const uint8_t *)&frame_buf[1], len );
+   pkt->lqi  = frame_buf[len+1];
+   pkt->rssi = frame_buf[len+2];
    uint32_t micro_ts = micros();   
    pkt->ts_sec  = micro_ts / 1000000UL;
    pkt->ts_usec = micro_ts % 1000000UL;
    return true;
 }
 
-void show_packet( rx_packet_t *pkt ) {
+void show_packet( rx_packet_t *pkt, uint8_t max_len = 127 ) {
    int len = pkt->frame_len;
+   if ( len > max_len ) { len = max_len; }
    for ( int i=0; i < len; i++ ) {
       Serial.printf( "%02X", pkt->frame_data[i] );
    }
@@ -273,15 +273,29 @@ void show_packet( rx_packet_t *pkt ) {
    Serial.flush();
 }
 
+void wifi_off() {
+   WiFi.mode( WIFI_STA );
+   WiFi.disconnect(); 
+   WiFi.mode( WIFI_OFF );
+   WiFi.forceSleepBegin();
+   delay(1);
+}
+
 mrf_reg_t reg;
 
-void wifi_off() {
-  WiFi.mode( WIFI_STA );
-  WiFi.disconnect(); 
-  WiFi.mode( WIFI_OFF );
-  WiFi.forceSleepBegin();
-  delay(1);
-}
+int count_down = COUNT_DOWN_START;
+int count = 0;
+
+#ifdef MRF24J40_SENDER
+int ack_count = 0;
+int retry_count = 0;
+int send_failed_count = 0;
+const char *message = "abcdefghijklmnopqrstuvwxyz";
+#endif
+
+#if defined(MRF24J40_RECEIVER) 
+int duplicate_count = 0;
+#endif
 
 void setup() { 
    Serial.begin( BAUD_RATE );
@@ -289,10 +303,9 @@ void setup() {
    Serial.flush();
    
    wifi_off(); // turn off WiFi to reduce power consumption
-   delay(100);
    mrf.begin();
-   mrf.sendResetPulse();
-   delay(100);
+   mrf.reset();
+   delay(10);
    
    rf_default_settings();
    rf_set_pan_id( PAN_ID );
@@ -325,23 +338,6 @@ void setup() {
    mrf.writeShortAddr( MRF_RXMCR, reg.value );
 #endif
 
-#ifdef MRF24J40_SNIFFER
-   Serial.println( F("MRF24J40 Test: Sniffer") );
-   rf_set_pan_id( 0xFFFF );
-   rf_set_device_short_addr( 0x0000 );
-
-   mrf.writeShortAddr( MRF_ACKTMOUT, 0 ); 
-      
-   // For promiscuous mode
-   reg.value = mrf.readShortAddr( MRF_RXMCR );
-   reg.rxmcr.NOACKRSP = 1; // disable auto ACK response
-   reg.rxmcr.PANCOORD = 0; // not used as a PAN coordinator
-   reg.rxmcr.COORD    = 0; // not used as a coordinator
-   reg.rxmcr.ERRPKT   = 0; // accept only packets with good CRC
-   reg.rxmcr.PROMI    = 1; // enable promiscuous mode: receive all packet types with good CRC
-   mrf.writeShortAddr( MRF_RXMCR, reg.value );
-#endif
-
    Serial.printf( "channel = %d\n", rf_get_channel() );
    Serial.printf( "short address = 0x%04X\n", rf_get_device_short_addr() );
    Serial.printf( "PAN ID = 0x%04X\n", rf_get_pan_id() );
@@ -356,28 +352,12 @@ void setup() {
       Serial.println( F("MRF24J40 initialization OK!") );
    }
    rf_flush_rx_buffer();   
-   attachInterrupt( digitalPinToInterrupt(D2), irq_handler, FALLING ); 
+   attachInterrupt( digitalPinToInterrupt(INT_PIN), irq_handler, FALLING ); 
 
-#ifdef MRF24J40_SENDER
-   delay(5000);
-#endif
-
+   delay(1000);
    ts = millis();
 }
 
-int count_down = COUNT_DOWN_START;
-int count = 0;
-
-#ifdef MRF24J40_SENDER
-int ack_count = 0;
-int retry_count = 0;
-int send_failed_count = 0;
-#endif
-
-#if defined(MRF24J40_RECEIVER) || defined(MRF24J40_SNIFFER) 
-int duplicate_count = 0;
-#endif
-   
 void loop() {
 
 #ifdef MRF24J40_SENDER
@@ -397,7 +377,7 @@ void loop() {
       }
       if ( count < NUM_PACKETS_TO_SEND ) {
          retry_count = 0;
-         sprintf( buf, "Hello %04d\n", count );
+         sprintf( buf, "#%04d,%s%s%s\n", count, message, message, message );
          rf_send_packet( (uint8_t *)buf, strlen(buf) );
          while ( !irq_tx_flag ) { // wait for TX completion
             retry_count++;
@@ -447,7 +427,7 @@ void loop() {
    }
 #endif
 
-#if defined(MRF24J40_RECEIVER) || defined(MRF24J40_SNIFFER) 
+#if defined(MRF24J40_RECEIVER) 
    if ( irq_rx_flag ) {
       if ( rf_packet_receive( &rx_packet ) ) {
         bool packet_equal = true;
@@ -456,7 +436,7 @@ void loop() {
               packet_equal = false;
               break;
            }
-        }
+        } // end-of-for
         if ( packet_equal ) {
            duplicate_count++;
         } else {
@@ -465,8 +445,6 @@ void loop() {
         memcpy( &rx_packet_saved, &rx_packet, sizeof(rx_packet_t) );
         count++;
       }
-      rf_flush_rx_buffer();
-      irq_rx_flag = false;
       ts = millis();
    }
    if ( millis() - ts >= 2000 ) {
@@ -478,7 +456,6 @@ void loop() {
       }
       duplicate_count = count = 0;
    }
-   delayMicroseconds(100);
 #endif
 
 }

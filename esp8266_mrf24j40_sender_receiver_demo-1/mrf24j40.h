@@ -383,8 +383,8 @@ class MRF24J40 {
     uint8_t  readLongAddr( uint16_t addr );
     void     writeShortAddr( uint8_t addr, uint8_t data );
     void     writeLongAddr( uint16_t addr, uint8_t data );
+    void     reset( uint16_t duration = 100 /* msec */ );
     bool     is_irq_active();
-    void     sendResetPulse( uint16_t duration = 100 /* msec */ );
 
  protected:
     void spi_cs_low();

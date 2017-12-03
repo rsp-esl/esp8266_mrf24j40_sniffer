@@ -13,15 +13,15 @@ MRF24J40::MRF24J40( int cs_pin, int reset_pin, int irq_pin )
 void MRF24J40::begin() {
   pinMode( _cs_pin, OUTPUT );
   spi_cs_high();
+
+  if ( _irq_pin != -1 ) {
+     pinMode( _irq_pin, INPUT_PULLUP );
+  }
   
   if ( _reset_pin != -1 ) {
      pinMode( _reset_pin, OUTPUT );
      digitalWrite( _reset_pin, HIGH );
-     sendResetPulse(); 
-  }
-
-  if ( _irq_pin != -1 ) {
-     pinMode( _irq_pin, INPUT_PULLUP );
+     reset(); 
   }
 
   SPI.begin();
@@ -45,7 +45,7 @@ void MRF24J40::spi_transfern( uint8_t *buf, uint16_t len ) {
   spi_cs_low();
   SPI.beginTransaction( SPISettings( 8000000, MSBFIRST, SPI_MODE0 ) );
   for ( int i=0; i < len; i++ ) {
-    buf[i] = SPI.transfer( buf[i] );
+     buf[i] = SPI.transfer( buf[i] );
   }
   SPI.endTransaction(); 
   spi_cs_high();
@@ -53,9 +53,7 @@ void MRF24J40::spi_transfern( uint8_t *buf, uint16_t len ) {
 
 /*
  *  Read data from short address of memory location in mrf24j40
- *
  *  Returns the value in the memory location specified.
- *
  *  param addr - Short address memory location
  */
 
@@ -77,9 +75,7 @@ uint8_t MRF24J40::readShortAddr( uint8_t addr ) {
 
 /*
  *  Write data to short address memory location
- *
  *  Sets the memory location to the value specified
- *
  *  param addr - Short address memory location 
  *  param data - Value that the memory location should be set to
  */
@@ -100,9 +96,7 @@ void MRF24J40::writeShortAddr( uint8_t addr, uint8_t data ) {
 
 /* 
  *  Read data from long address of memory location in mrf24j40
- *
  *  Returns the value in the memory location specified.
- *   
  *  param addr - Long address memory location (see mrf24h40_defines.h)
  */
 
@@ -135,9 +129,7 @@ uint8_t MRF24J40::readLongAddr( uint16_t addr ) {
 
 /* 
  * Write data to long address memory location
- *
- * Sets the memory location to the value specified
- *   
+ * Sets the memory location to the value specified 
  * param addr - Long address memory location 
  * param data - Value that the memory location should be set to
  */
@@ -166,7 +158,6 @@ void MRF24J40::writeLongAddr( uint16_t addr, uint8_t data ) {
   spi_transfern( spi_buf, 3 ); 
 }
 
-
 bool MRF24J40::is_irq_active() { // is INT (interrupt) pin active (active-low)
   if ( _irq_pin == -1 ) {
     Serial.println("IRQ pin is not set...");
@@ -175,7 +166,7 @@ bool MRF24J40::is_irq_active() { // is INT (interrupt) pin active (active-low)
   return ( digitalRead( _irq_pin) == LOW) ? true : false;
 }
 
-void MRF24J40::sendResetPulse( uint16_t duration ) {
+void MRF24J40::reset( uint16_t duration ) {
   if ( _reset_pin == -1 ) {
     return;
   }
