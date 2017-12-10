@@ -160,7 +160,6 @@ void MRF24J40::writeLongAddr( uint16_t addr, uint8_t data ) {
 
 bool MRF24J40::is_irq_active() { // is INT (interrupt) pin active (active-low)
   if ( _irq_pin == -1 ) {
-    Serial.println("IRQ pin is not set...");
     return false;
   }
   return ( digitalRead( _irq_pin) == LOW) ? true : false;
