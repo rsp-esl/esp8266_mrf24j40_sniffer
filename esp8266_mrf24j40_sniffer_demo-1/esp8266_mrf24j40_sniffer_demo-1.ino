@@ -7,24 +7,21 @@
 //   - ESP8266 (WeMos D1 mini) + MRF24J40MA module
 //   - Arduino IDE 1.8.2 / ESP8266 package v2.3.0 
 // 
-// Date: 2017-12-03
+// Date: 2017-12-10
 ///////////////////////////////////////////////////////////////////////////////////////
 
 #include <ESP8266WiFi.h>
 #include "mrf24j40.h"
 
-// Specify the radio channel 
-// (according to IEEE 802.15.4: select channel number between 11..26)
-int channel = 11; 
 
 // Specify the PAN ID (a 16-bit hex integer value)
 #define PAN_ID                (0xFFFF)
 
-// Specify the short (16-bit) network address for the sender
-#define SENDER_ADDR           (0x0000)
-
 // Specify the baudrate of the serial port for debugging purposes
-#define BAUD_RATE             (250000) 
+#define BAUD_RATE             (921600)
+
+const int scan_channels_list[] = {13,14,25,26,0 /* terminated with zero*/ };
+int channel_index = 0;
 
 ///////////////////////////////////////////////////////////////////////////////////////
 // Pin definitions for ESP8266 (NodeMCU, WeMos D1 mini, ...)
@@ -48,35 +45,35 @@ int channel = 11;
 MRF24J40 mrf( CS_PIN /*cs*/, RST_PIN /*reset*/, INT_PIN /*irq*/ ); 
 
 volatile bool irq_rx_flag = false; // interrupt (INT) request flag for RX reception
+volatile uint32_t irq_count = 0;
 uint8_t frame_buf[132];
 
+mrf_reg_t reg;
 uint32_t ts;                    // used to keep timestamp
 char buf[200];                  // string buffer
-rx_packet_t rx_packet;          // used for the received packet
-rx_packet_t rx_packet_saved;     
+
+///////////////////////////////////////////////////////////////////////////////////////
 
 void rf_default_settings() {
-   mrf.writeShortAddr( MRF_PACON2,  0x98 );
-   mrf.writeShortAddr( MRF_TXSTBL,  0x95 );
-   mrf.writeShortAddr( MRF_BBREG2,  0x80 );         // set CCA mode to ED (energy detection)
-   mrf.writeShortAddr( MRF_CCAEDTH, 0x60 );         // set CCA ED thredshold value
-   mrf.writeShortAddr( MRF_ORDER,   0xFF );         // set BO=15 and SO=15
+   mrf.writeShortAddr( MRF_PACON2,   0x98 );
+   mrf.writeShortAddr( MRF_TXSTBL,   0x95 );
+   
+   mrf.writeLongAddr( MRF_RFCON0,    0x03 );
+   mrf.writeLongAddr( MRF_RFCON1,    0x01 );
+   mrf.writeLongAddr( MRF_RFCON2,    0x80 );
+   mrf.writeLongAddr( MRF_RFCON6,    0x90 );
+   mrf.writeLongAddr( MRF_RFCON7,    0x80 );
+   mrf.writeLongAddr( MRF_RFCON8,    0x10 );
+   mrf.writeLongAddr( MRF_SLPCON1,   0x21 );
+   mrf.writeLongAddr( MRF_SLPCON0,   0x00 );
+      
+   mrf.writeShortAddr( MRF_BBREG2,   0x80 );         // set CCA mode to ED (energy detection)
+   mrf.writeShortAddr( MRF_CCAEDTH,  0x60 );         // set CCA ED thredshold value
+   mrf.writeShortAddr( MRF_ORDER,    0xFF );         // set BO=15 and SO=15
 
-   mrf.writeShortAddr( MRF_ACKTMOUT, 0x80 | 0x3F ); // set the ACK timeout, set request ACK bit   
-   mrf.writeShortAddr( MRF_BBREG6,  0x40 );         // set appended RSSI value to RXFIFO
+   mrf.writeShortAddr( MRF_ACKTMOUT, 0x00 );
+   mrf.writeShortAddr( MRF_BBREG6,   0x40 );        // set appended RSSI value to RXFIFO
   
-   mrf.writeLongAddr( MRF_RFCON0,   0x03 );
-   mrf.writeLongAddr( MRF_RFCON1,   0x01 );
-   mrf.writeLongAddr( MRF_RFCON2,   0x80 );
-   mrf.writeLongAddr( MRF_RFCON6,   0x90 );
-   mrf.writeLongAddr( MRF_RFCON7,   0x80 );
-   mrf.writeLongAddr( MRF_RFCON8,   0x10 );
-   mrf.writeLongAddr( MRF_SLPCON1,  0x21 );
-
-   //  INTEDGE = 0 : falling-edge or active-low
-   // #SLPCKEN = 0 : enable low-power clock selection
-   mrf.writeLongAddr( MRF_SLPCON0,  0x00 );
-
    // RXIE  = 0:  Enable RX FIFO reception interrupt
    // TXNIE = 1:  Disable TX Normal FIFO transmission interrupt
    mrf.writeShortAddr( MRF_INTCON,  0b11110111 ); 
@@ -94,7 +91,7 @@ void rf_default_settings() {
    mrf.writeShortAddr( MRF_RFCTL,    0x04 );     // set RFCTL = 0x04 (reset RF state machine)
    mrf.writeShortAddr( MRF_RFCTL,    0x00 );     // set RFCTL = 0x00 (release RF reset)
 
-   delayMicroseconds( 200 );                     // delay for at least 192us
+   delayMicroseconds( 250 );                     // delay for at least 192us
 }
 
 // set the TX power level
@@ -111,12 +108,15 @@ uint8_t rf_get_tx_power( ) {
 void rf_set_channel( uint8_t channel ) { /* channel: 11..26 */
    if (channel < 11) { channel = 11; }
    else if (channel > 26) { channel = 26; }
-   channel = (channel - 11) & 0x0f;
-   mrf.writeLongAddr( MRF_RFCON0, ((channel << 4) | 0x03) );
+   uint8_t value = (channel - 11) & 0x0f;
+   mrf.writeLongAddr( MRF_RFCON0, ((value << 4) | 0x03) );
+
+   mrf.writeShortAddr( MRF_RFCTL,    0x04 );     // set RFCTL = 0x04 (reset RF state machine)
+   mrf.writeShortAddr( MRF_RFCTL,    0x00 );     // set RFCTL = 0x00 (release RF reset)   
 }
 
 // set the IEEE 802.15.4 (64-bit) extended address
-void rf_set_device_long_addr( uint8_t *addr_bytes ) {
+void rf_set_device_long_addr( const uint8_t *addr_bytes ) {
    uint8_t i;
    for ( i=0; i < 8; i++) { // high-byte first
       mrf.writeShortAddr( MRF_EADR7-i, addr_bytes[i] );
@@ -160,6 +160,12 @@ uint16_t rf_get_pan_id( ) {
    return addr;
 }
 
+void rf_get_device_long_addr( uint8_t *addr_bytes ) {
+   for ( int i=0; i < 8; i++) { // high-byte first
+      addr_bytes[i] = mrf.readShortAddr( MRF_EADR7-i );
+   }
+}
+
 // flush RX Buffer
 inline void rf_flush_rx_buffer() {
    mrf_reg_t _reg;
@@ -169,6 +175,8 @@ inline void rf_flush_rx_buffer() {
 }
 
 void irq_handler() {
+   irq_count++;   
+   noInterrupts();                            // disable global interrupt
    mrf.writeShortAddr( MRF_BBREG1, 0x40 );    // disable RX (set RXDECINV bit)
    // read data from RX FIFO and save to frame buffer (frame_buf)
    uint16_t frame_pos = MRF_RX_FIFO;
@@ -182,10 +190,11 @@ void irq_handler() {
       *ptr++ = mrf.readLongAddr( frame_pos++ );  // LQI
       *ptr++ = mrf.readLongAddr( frame_pos++ );  // RSSI
    }
+   uint8_t value = mrf.readShortAddr( MRF_INTSTAT );   // read the status and clear interrupt
    rf_flush_rx_buffer();
    mrf.writeShortAddr( MRF_BBREG1, 0x00 );    // enable RX (clear RXDECINV bit)
+   interrupts();                              // enable global interrupt
    irq_rx_flag = true;
-   mrf.readShortAddr( MRF_INTSTAT );  // read the status and clear interrupt
 }
 
 bool rf_packet_receive( rx_packet_t *pkt ) {
@@ -200,7 +209,8 @@ bool rf_packet_receive( rx_packet_t *pkt ) {
       pkt->lqi  = frame_buf[len+1];
       pkt->rssi = frame_buf[len+2];
       pkt->frame_len = len;
-   } else {
+   } 
+   else {
       uint16_t frame_pos = MRF_RX_FIFO + 6; // skip the first 6 bytes in RX FIFO
       ptr = ptr+5; // skip the first 5 bytes in data buffer
       for ( int i=5; i < len; i++ ) {
@@ -228,6 +238,8 @@ void show_packet( rx_packet_t *pkt, uint8_t max_len = 127 ) {
    Serial.flush();
 }
 
+///////////////////////////////////////////////////////////////////////////////////////
+
 void wifi_off() {
    WiFi.mode( WIFI_STA );
    WiFi.disconnect(); 
@@ -236,25 +248,20 @@ void wifi_off() {
    delay(1);
 }
 
-mrf_reg_t reg;
-int count = 0;
-int duplicate_count = 0;
-
 void setup() { 
    Serial.begin( BAUD_RATE );
    Serial.println( F("\n\n\n\n\n\n\n") );
    Serial.flush();
    
    wifi_off(); // turn off WiFi to reduce power consumption
+
    mrf.begin();
    mrf.reset();
-   delay(10);
-   
    rf_default_settings();
    rf_set_pan_id( PAN_ID );
-   rf_set_channel( channel );
-
-   // For promiscuous mode
+   rf_set_device_short_addr( 0x0000 );
+   
+   // enable promiscuous mode
    reg.value = mrf.readShortAddr( MRF_RXMCR );
    reg.rxmcr.NOACKRSP = 1; // disable auto ACK response
    reg.rxmcr.PANCOORD = 0; // not used as a PAN coordinator
@@ -262,6 +269,9 @@ void setup() {
    reg.rxmcr.ERRPKT   = 0; // accept only packets with good CRC
    reg.rxmcr.PROMI    = 1; // enable promiscuous mode: receive all packet types with good CRC
    mrf.writeShortAddr( MRF_RXMCR, reg.value );
+
+   int channel = scan_channels_list[ channel_index ];
+   rf_set_channel( channel );
    
    Serial.printf( "channel = %d\n", rf_get_channel() );
    Serial.printf( "short address = 0x%04X\n", rf_get_device_short_addr() );
@@ -283,9 +293,13 @@ void setup() {
    ts = millis();
 }
 
-int silence_count = 0;
-
 void loop() {
+   static int silence_count = 0;
+   static int count = 0;
+   static int duplicate_count = 0;
+   static rx_packet_t rx_packet;
+   static rx_packet_t rx_packet_saved;     
+
    if ( irq_rx_flag ) {
       if ( rf_packet_receive( &rx_packet ) ) {
         bool packet_equal = true;
@@ -310,21 +324,24 @@ void loop() {
       if ( count > 0 ) {
          Serial.println( F("=====================================") );
          Serial.printf( "#received packets  : %d\n", count );
-         Serial.printf( "#duplicate packets : %d\n\n", duplicate_count );
+         Serial.printf( "#duplicate packets : %d\n", duplicate_count );
+         Serial.printf( "#interrupts: %d\n", irq_count );
          silence_count = 0;
+         irq_count = 0;
+         Serial.println( F("=====================================") );
       } 
       else {
          Serial.println( '.' );
          silence_count++;
       }
-      if ( silence_count > 10 ) {
+      if ( silence_count > 15 ) {
          silence_count = 0;
-         if ( channel == 26 ) {
-           channel = 11;
-         } else {
-           channel++;
+         channel_index++;
+         if ( scan_channels_list[ channel_index ] == 0 ) {
+            channel_index = 0;
          }
-         rf_set_channel( channel );
+         rf_set_channel( scan_channels_list[ channel_index ] );
+         
          Serial.printf( "change to channel number %d\n", rf_get_channel() );
       }
       duplicate_count = count = 0;
