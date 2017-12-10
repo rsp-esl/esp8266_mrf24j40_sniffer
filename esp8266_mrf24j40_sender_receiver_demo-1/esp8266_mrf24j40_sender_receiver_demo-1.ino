@@ -7,21 +7,26 @@
 //   - ESP8266 (WeMos D1 mini) + MRF24J40MA module
 //   - Arduino IDE 1.8.2 / ESP8266 package v2.3.0 
 // 
-// This sketch is used to program the ESP8266 + MRF24J40 hardware so that
-// it operates as either a sender or a receiver for testing purposes.
-// Date: 2017-12-03
+// This sketch was created to show to how use the ESP8266 module together
+// with the MRF24J40 module. The hardware will operate as either a sender 
+// or a receiver. For testing purposes two modules are necessary.
+// Date: 2017-12-10
 ///////////////////////////////////////////////////////////////////////////////////////
 
 #include <ESP8266WiFi.h>
 #include "mrf24j40.h"
 
-// Define the type of device to be used: sender or receiver
-//#define MRF24J40_SENDER
-#define MRF24J40_RECEIVER
+// Define the type of device to be used: either sender or receiver
+#define MRF24J40_SENDER
+//#define MRF24J40_RECEIVER
+
+#ifdef MRF24J40_SENDER // If you use the MRF24J40MA module, define 'USE_MRF24J40MB'
+#define USE_MRF24J40MB
+#endif
 
 // Specify the radio channel 
 // (according to IEEE 802.15.4: select channel number between 11..26)
-#define CHANNEL               (14) 
+#define CHANNEL               (25) 
 
 // Specify the PAN ID (a 16-bit hex integer value)
 #define PAN_ID                (0x1234)
@@ -34,11 +39,6 @@
 
 // Specify the baudrate of the serial port for debugging purposes
 #define BAUD_RATE             (250000) 
-
-// For the sender
-#define NUM_PACKETS_TO_SEND   (200)
-#define SEND_INTERVAL_MSEC    (20)
-#define COUNT_DOWN_START      (15000/SEND_INTERVAL_MSEC)
 
 ///////////////////////////////////////////////////////////////////////////////////////
 // Pin definitions for ESP8266 (NodeMCU, WeMos D1 mini, ...)
@@ -61,26 +61,40 @@
 
 MRF24J40 mrf( CS_PIN /*cs*/, RST_PIN /*reset*/, INT_PIN /*irq*/ ); 
 
+#ifdef MRF24J40_SENDER
+#define NUM_PACKETS_TO_SEND   (200)
+#define SEND_INTERVAL_MSEC    (20)
+#define COUNT_DOWN_START      (15000 / SEND_INTERVAL_MSEC)
+
+int count_down = COUNT_DOWN_START;
+int retry_count = 0;
+int send_failed_count = 0;
+int retransmissions = 0;        // used to count the number of packet retransmissions
+
+const char *message = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+#endif
+
+#if defined(MRF24J40_RECEIVER) 
+int duplicate_count = 0;
+rx_packet_t rx_packet;          // used for the received packet
+rx_packet_t rx_packet_saved;
+#endif
+
 volatile bool irq_tx_flag = false; // interrupt (INT) request flag for TX completion
 volatile bool irq_rx_flag = false; // interrupt (INT) request flag for RX reception
-uint8_t frame_buf[132];
 
+mrf_reg_t reg;
+int count = 0;
+uint8_t frame_buf[132];
 uint32_t ts;                    // used to keep timestamp
 char buf[200];                  // string buffer
-rx_packet_t rx_packet;          // used for the received packet
-rx_packet_t rx_packet_saved;     
-int retransmissions = 0;        // used to count the number of packet retransmissions
+
+///////////////////////////////////////////////////////////////////////////////////////
 
 void rf_default_settings() {
    mrf.writeShortAddr( MRF_PACON2,  0x98 );
    mrf.writeShortAddr( MRF_TXSTBL,  0x95 );
-   mrf.writeShortAddr( MRF_BBREG2,  0x80 );         // set CCA mode to ED (energy detection)
-   mrf.writeShortAddr( MRF_CCAEDTH, 0x60 );         // set CCA ED thredshold value
-   mrf.writeShortAddr( MRF_ORDER,   0xFF );         // set BO=15 and SO=15
-
-   mrf.writeShortAddr( MRF_ACKTMOUT, 0x80 | 0x3F ); // set the ACK timeout, set request ACK bit   
-   mrf.writeShortAddr( MRF_BBREG6,  0x40 );         // set appended RSSI value to RXFIFO
-  
+   
    mrf.writeLongAddr( MRF_RFCON0,   0x03 );
    mrf.writeLongAddr( MRF_RFCON1,   0x01 );
    mrf.writeLongAddr( MRF_RFCON2,   0x80 );
@@ -88,11 +102,15 @@ void rf_default_settings() {
    mrf.writeLongAddr( MRF_RFCON7,   0x80 );
    mrf.writeLongAddr( MRF_RFCON8,   0x10 );
    mrf.writeLongAddr( MRF_SLPCON1,  0x21 );
-
-   //  INTEDGE = 0 : falling-edge or active-low
-   // #SLPCKEN = 0 : enable low-power clock selection
    mrf.writeLongAddr( MRF_SLPCON0,  0x00 );
+      
+   mrf.writeShortAddr( MRF_BBREG2,  0x80 );         // set CCA mode to ED (energy detection)
+   mrf.writeShortAddr( MRF_CCAEDTH, 0x60 );         // set CCA ED thredshold value
+   mrf.writeShortAddr( MRF_ORDER,   0xFF );         // set BO=15 and SO=15
 
+   mrf.writeShortAddr( MRF_ACKTMOUT, 0x80 | 0x3F ); // set the ACK timeout, set request ACK bit   
+   mrf.writeShortAddr( MRF_BBREG6,  0x40 );         // set appended RSSI value to RXFIFO
+  
    // RXIE  = 0:  Enable RX FIFO reception interrupt
    // TXNIE = 0:  Enable TX Normal FIFO transmission interrupt
    mrf.writeShortAddr( MRF_INTCON,  0b11110110 ); 
@@ -110,7 +128,7 @@ void rf_default_settings() {
    mrf.writeShortAddr( MRF_RFCTL,    0x04 );     // set RFCTL = 0x04 (reset RF state machine)
    mrf.writeShortAddr( MRF_RFCTL,    0x00 );     // set RFCTL = 0x00 (release RF reset)
 
-   delayMicroseconds( 200 );                     // delay for at least 192us
+   delayMicroseconds( 250 );                     // delay for at least 192us
 }
 
 // set the TX power level
@@ -127,14 +145,16 @@ uint8_t rf_get_tx_power( ) {
 void rf_set_channel( uint8_t channel ) { /* channel: 11..26 */
    if (channel < 11) { channel = 11; }
    else if (channel > 26) { channel = 26; }
-   channel = (channel - 11) & 0x0f;
-   mrf.writeLongAddr( MRF_RFCON0, ((channel << 4) | 0x03) );
+   uint8_t value = (channel - 11) & 0x0f;
+   mrf.writeLongAddr( MRF_RFCON0, ((value << 4) | 0x03) );
+
+   mrf.writeShortAddr( MRF_RFCTL,    0x04 );     // set RFCTL = 0x04 (reset RF state machine)
+   mrf.writeShortAddr( MRF_RFCTL,    0x00 );     // set RFCTL = 0x00 (release RF reset)   
 }
 
 // set the IEEE 802.15.4 (64-bit) extended address
-void rf_set_device_long_addr( uint8_t *addr_bytes ) {
-   uint8_t i;
-   for ( i=0; i < 8; i++) { // high-byte first
+void rf_set_device_long_addr( const uint8_t *addr_bytes ) {
+   for ( int i=0; i < 8; i++) { // high-byte first
       mrf.writeShortAddr( MRF_EADR7-i, addr_bytes[i] );
    }
 }
@@ -154,7 +174,7 @@ void rf_set_pan_id( uint16_t pan_id ) {
 // get the radio channel: 11..26
 uint8_t rf_get_channel() {
    uint8_t value = mrf.readLongAddr( MRF_RFCON0 );
-   value = ((value >> 4) & 0x0f) + 11;
+   value = (value >> 4) + 11;
    return value;
 }
 
@@ -169,11 +189,17 @@ uint16_t rf_get_device_short_addr( ) {
 
 // get the 16-bit PAN ID
 uint16_t rf_get_pan_id( ) {
-   uint8_t value = mrf.readShortAddr( MRF_PANIDH );
-   uint16_t addr = value << 8;
+   uint8_t  value = mrf.readShortAddr( MRF_PANIDH );
+   uint16_t addr  = (value << 8);
    value = mrf.readShortAddr( MRF_PANIDL );
    addr |= value;
    return addr;
+}
+
+void rf_get_device_long_addr( uint8_t *addr_bytes ) {
+   for ( int i=0; i < 8; i++) { // high-byte first
+      addr_bytes[i] = mrf.readShortAddr( MRF_EADR7-i );
+   }
 }
 
 // flush RX Buffer
@@ -195,7 +221,7 @@ void rf_send_packet( uint8_t *data, uint8_t len ) {
    mrf.writeLongAddr( i++, 9+len );        // frame length
 
    // data frame type, intra-PAN, ACK req., short address for dest. and src.
-   mrf.writeLongAddr( i++, 0x61 );         // first byte of frame control field (FCF)
+   mrf.writeLongAddr( i++, 0x61 );         // first  byte of frame control field (FCF)
    mrf.writeLongAddr( i++, 0x88 );         // second byte of frame control field (FCF)
    mrf.writeLongAddr( i++, seq_num++ );    // sequence number
 
@@ -226,6 +252,8 @@ void irq_handler() {
    _reg.value = mrf.readShortAddr( MRF_INTSTAT );  // read the status and clear interrupt
 
    if ( _reg.intstat.RXIF == 1 ) {
+      noInterrupts();                            // disable global interrupt
+      irq_rx_flag = true;
       mrf.writeShortAddr( MRF_BBREG1, 0x40 );    // disable RX (set RXDECINV bit)
       // read data from RX FIFO and save to frame buffer (frame_buf)
       uint16_t frame_pos = MRF_RX_FIFO;
@@ -237,10 +265,10 @@ void irq_handler() {
       }
       rf_flush_rx_buffer();
       mrf.writeShortAddr( MRF_BBREG1, 0x00 );    // enable RX (clear RXDECINV bit)
-      irq_rx_flag = true;
+      interrupts();                              // enable global interrupt
    } 
    if ( _reg.intstat.TXNIF == 1 ) {
-      irq_tx_flag = true;
+      irq_tx_flag = true;    
    }
 }
 
@@ -287,22 +315,6 @@ void wifi_off() {
    delay(1);
 }
 
-mrf_reg_t reg;
-
-int count_down = COUNT_DOWN_START;
-int count = 0;
-
-#ifdef MRF24J40_SENDER
-int ack_count = 0;
-int retry_count = 0;
-int send_failed_count = 0;
-const char *message = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-#endif
-
-#if defined(MRF24J40_RECEIVER) 
-int duplicate_count = 0;
-#endif
-
 void setup() { 
    Serial.begin( BAUD_RATE );
    Serial.println( F("\n\n\n\n\n\n\n") );
@@ -315,25 +327,16 @@ void setup() {
    
    rf_default_settings();
    rf_set_pan_id( PAN_ID );
-   rf_set_channel( CHANNEL );
 
 #ifdef MRF24J40_SENDER  // sender
    Serial.println( F("MRF24J40 Test: Sender") );
    rf_set_device_short_addr( SENDER_ADDR );
-   
-   reg.value = mrf.readShortAddr( MRF_RXMCR );
-   reg.rxmcr.NOACKRSP = 0; // enable auto ACK response
-   reg.rxmcr.PANCOORD = 0; // not used as a PAN coordinator
-   reg.rxmcr.COORD    = 0; // not used as a coordinator
-   reg.rxmcr.ERRPKT   = 0; // accept only packets with good CRC
-   //reg.rxmcr.PROMI  = 0; // disable promiscuous mode
-   reg.rxmcr.PROMI    = 1; // enable promiscuous mode (in order to capture ACK frame)
-   mrf.writeShortAddr( MRF_RXMCR, reg.value ); 
 #endif
 
 #ifdef MRF24J40_RECEIVER
    Serial.println( F("MRF24J40 Test: Receiver") );
    rf_set_device_short_addr( RECEIVER_ADDR );
+#endif
 
    reg.value = mrf.readShortAddr( MRF_RXMCR );
    reg.rxmcr.NOACKRSP = 0; // enable auto ACK response
@@ -342,7 +345,8 @@ void setup() {
    reg.rxmcr.ERRPKT   = 0; // accept only packets with good CRC
    reg.rxmcr.PROMI    = 0; // disable promiscuous mode
    mrf.writeShortAddr( MRF_RXMCR, reg.value );
-#endif
+
+   rf_set_channel( CHANNEL );
 
    Serial.printf( "channel = %d\n", rf_get_channel() );
    Serial.printf( "short address = 0x%04X\n", rf_get_device_short_addr() );
@@ -375,49 +379,32 @@ void loop() {
             Serial.print('.');
          }
          if ( count_down == 0 ) { 
-            retransmissions = send_failed_count = ack_count = count = 0;
-            Serial.println( F("\n\n==================================") );
+            retransmissions = send_failed_count = count = 0;
+            Serial.println();
+            Serial.println( F("=====================================") );
             Serial.printf( "Sending %d packets ...\n", NUM_PACKETS_TO_SEND );
          }
          return;
       }
       if ( count < NUM_PACKETS_TO_SEND ) {
-         retry_count = 0;
          sprintf( buf, "%s,#%04d\n", message, count );
          rf_send_packet( (uint8_t *)buf, strlen(buf) );
+         retry_count = 0;
          while ( !irq_tx_flag ) { // wait for TX completion
             retry_count++;
-            if ( retry_count >= 15 ) {
-               send_failed_count++;
-               Serial.println( F(">>> Packet sending failed") );
+            if ( retry_count >= 50 ) { // timeout for TX
                break;
             }
             delayMicroseconds(100);
          }  // end-of-while
+         irq_tx_flag = false;
          
          reg.value = mrf.readShortAddr( MRF_TXSTAT );
+         if ( reg.txstat.TXNSTAT == 1 ) {
+            send_failed_count++;
+            Serial.println( F(">>> Packet sending error") );
+         }
          retransmissions += reg.txstat.TXNRETRY;
-
-         if ( irq_tx_flag ) { // if TX completion is notified
-            retry_count = 0;
-            while ( !irq_rx_flag ) { // wait for incoming ACK packet
-               if ( ++retry_count > 25 ) {
-                  Serial.println( F(">>> No ACK") );
-                  break; 
-               }
-               delayMicroseconds(100);
-            } // end-of-while
-         }
-         
-         if ( irq_rx_flag ) {
-           if ( rf_packet_receive( &rx_packet ) ) {
-              show_packet( &rx_packet );
-           }
-           ack_count++; // increment ACK packet count
-         }
-         irq_tx_flag = false;
-         irq_rx_flag = false;
-         mrf.readShortAddr( MRF_INTSTAT );  // read the status and clear interrupt
       }
       count++;
       if ( count == NUM_PACKETS_TO_SEND ) { // the last packet sent?
@@ -425,8 +412,7 @@ void loop() {
          Serial.printf( "#TX attempts    : %d\n", count );
          Serial.printf( "#TX fails       : %d\n", send_failed_count );
          Serial.printf( "#TX resendings  : %d\n", retransmissions );
-         Serial.printf( "#ACK receptions : %d\n\n", ack_count );
-         retransmissions = ack_count = send_failed_count = count = 0;
+         retransmissions = send_failed_count = count = 0;
          count_down = COUNT_DOWN_START;
          ts = millis();
       }
