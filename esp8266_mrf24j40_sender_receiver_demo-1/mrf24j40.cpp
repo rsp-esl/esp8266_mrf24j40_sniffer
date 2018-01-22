@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include "mrf24j40.h"
 
+#define SPI_CLOCK_FREQ  10000000 // MHz
 
 MRF24J40::MRF24J40( int cs_pin, int reset_pin, int irq_pin ) 
  : _cs_pin( cs_pin ), _reset_pin( reset_pin ), _irq_pin( irq_pin )
@@ -44,7 +45,7 @@ inline void MRF24J40::spi_cs_high() {
 
 void MRF24J40::spi_transfern( uint8_t *buf, uint16_t len ) {
   spi_cs_low();
-  SPI.beginTransaction( SPISettings( 8000000, MSBFIRST, SPI_MODE0 ) );
+  SPI.beginTransaction( SPISettings( SPI_CLOCK_FREQ, MSBFIRST, SPI_MODE0 ) );
   for ( int i=0; i < len; i++ ) {
      buf[i] = SPI.transfer( buf[i] );
   }

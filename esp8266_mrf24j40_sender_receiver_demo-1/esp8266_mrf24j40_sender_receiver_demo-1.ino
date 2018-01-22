@@ -20,9 +20,8 @@
 #define MRF24J40_SENDER
 //#define MRF24J40_RECEIVER
 
-#ifdef MRF24J40_SENDER // If you use the MRF24J40MA module, define 'USE_MRF24J40MB'
-#define USE_MRF24J40MB
-#endif
+// Uncomment the following line if you use MRF24J40MB or MC
+//#define USE_MRF24J40MB
 
 // Specify the radio channel 
 // (according to IEEE 802.15.4: select channel number between 11..26)
@@ -452,4 +451,5 @@ void loop() {
 
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
 
